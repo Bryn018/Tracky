@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!-- Tracky is fully offline — no internet needed -->
+    <issue id="UnusedResources" severity="ignore" />
+    
+    <!-- SMS permissions are required by design -->
+    <issue id="MissingPermission" severity="ignore">
+        <ignore path="src/main/AndroidManifest.xml" />
+    </issue>
+    
+    <!-- Trusted source for SMS parsing -->
+    <issue id="TrustedWebActivity" severity="ignore" />
+    
+    <!-- Custom SMS app handling -->
+    <issue id="ProtectedClient" severity="ignore" />
+</lint>
