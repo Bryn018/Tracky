@@ -1,6 +1,5 @@
 package com.tracky.app.data.sms
 
-import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
 import android.provider.Telephony
@@ -13,18 +12,17 @@ import com.tracky.app.data.local.entity.TransactionEntity
 class SmsReader(private val context: Context) {
 
     /**
-     * Reads existing SMS inbox messages from the last ~30 days,
+     * Reads existing SMS inbox messages from the last [days] days,
      * parses each one through [SmsParser], and returns the list of
      * successfully parsed [TransactionEntity] objects.
      *
      * Messages that don't match mobile money patterns are filtered out.
      */
-    fun readExistingSms(): List<TransactionEntity> {
+    fun readExistingSms(days: Int = DEFAULT_HISTORY_DAYS): List<TransactionEntity> {
         val transactions = mutableListOf<TransactionEntity>()
         val uri = Uri.parse("content://sms/inbox")
 
-        // Only look at messages from the last 30 days for performance
-        val thirtyDaysAgo = System.currentTimeMillis() - (30L * 24 * 60 * 60 * 1000)
+        val cutoff = System.currentTimeMillis() - (days.toLong() * MILLIS_PER_DAY)
 
         val projection = arrayOf(
             Telephony.Sms.ADDRESS,
@@ -33,7 +31,7 @@ class SmsReader(private val context: Context) {
         )
 
         val selection = "${Telephony.Sms.DATE} >= ?"
-        val selectionArgs = arrayOf(thirtyDaysAgo.toString())
+        val selectionArgs = arrayOf(cutoff.toString())
 
         val cursor = context.contentResolver.query(
             uri,
@@ -67,5 +65,12 @@ class SmsReader(private val context: Context) {
         }
 
         return transactions
+    }
+
+    companion object {
+        const val MILLIS_PER_DAY = 24L * 60 * 60 * 1000
+
+        /** How far back the first-install history import reaches. */
+        const val DEFAULT_HISTORY_DAYS = 90
     }
 }

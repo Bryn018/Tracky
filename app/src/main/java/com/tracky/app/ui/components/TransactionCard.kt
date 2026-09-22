@@ -169,7 +169,7 @@ fun TransactionCard(
             Spacer(modifier = Modifier.width(12.dp))
 
             Text(
-                text = "$amountPrefixKsh $formattedAmount",
+                text = "${amountPrefix}KSh $formattedAmount",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 color = amountColor

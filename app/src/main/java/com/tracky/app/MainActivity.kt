@@ -18,11 +18,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.navigation.compose.rememberNavController
 import com.tracky.app.ui.navigation.MainScreen
 import com.tracky.app.ui.theme.TrackyTheme
+import com.tracky.app.worker.InitialBackfillWorker
 import dagger.hilt.android.AndroidEntryPoint
 import com.tracky.app.ui.screens.onboarding.OnboardingScreen
+import com.tracky.app.data.repository.SettingsRepository
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import javax.inject.Inject
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -31,13 +37,16 @@ class MainActivity : ComponentActivity() {
     private var notificationPermissionGranted by mutableStateOf(false)
     private var onboardingCompleted by mutableStateOf(false)
 
+    @Inject
+    lateinit var settingsRepository: SettingsRepository
+
     private val smsPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val wasGranted = permissions[Manifest.permission.READ_SMS] == true
         smsPermissionGranted = wasGranted
         if (wasGranted) {
-            checkAndRequestNotificationPermission()
+            onSmsPermissionGranted()
         }
     }
 
@@ -57,9 +66,19 @@ class MainActivity : ComponentActivity() {
         checkSmsPermission()
         checkNotificationPermission()
 
+        // Read persisted onboarding state so onboarding only ever shows once
+        lifecycleScope.launch {
+            val firstLaunch = settingsRepository.isFirstLaunch().first()
+            onboardingCompleted = !firstLaunch
+        }
+
         // Auto-request SMS permission on first launch if not already granted
         if (!smsPermissionGranted) {
             requestSmsPermission()
+        } else {
+            // Permission already granted (e.g. app upgrade or relaunch):
+            // make sure the backfill + periodic scan are armed.
+            onSmsPermissionGranted()
         }
 
         setContent {
@@ -78,13 +97,32 @@ class MainActivity : ComponentActivity() {
                         )
                     } else {
                         OnboardingScreen(
-                            onFinish = { onboardingCompleted = true },
+                            onFinish = {
+                                onboardingCompleted = true
+                                lifecycleScope.launch {
+                                    settingsRepository.setFirstLaunch(false)
+                                }
+                                if (smsPermissionGranted) {
+                                    onSmsPermissionGranted()
+                                }
+                            },
                             onSmsGranted = { requestSmsPermission() }
                         )
                     }
                 }
             }
         }
+    }
+
+    /**
+     * Called whenever SMS permission is (or is found to be) granted.
+     * Arms the one-time 90-day history import. The periodic catch-up scan
+     * is armed by the backfill worker once the import completes, so the
+     * two never race on a fresh install. Both are idempotent, so calling
+     * this on every launch is safe.
+     */
+    private fun onSmsPermissionGranted() {
+        InitialBackfillWorker.enqueue(this)
     }
 
     private fun checkSmsPermission() {

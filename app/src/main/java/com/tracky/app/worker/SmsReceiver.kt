@@ -10,16 +10,12 @@ import android.provider.Telephony
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import androidx.work.ExistingPeriodicWorkPolicy
-import androidx.work.PeriodicWorkRequestBuilder
-import androidx.work.WorkManager
 import com.tracky.app.MainActivity
 import com.tracky.app.R
 import com.tracky.app.TrackyApplication
 import com.tracky.app.data.local.entity.TransactionEntity
 import com.tracky.app.data.repository.TransactionRepository
 import com.tracky.app.data.sms.SmsParser
-import com.tracky.app.util.SystemUtils
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -57,16 +53,11 @@ class SmsReceiver : BroadcastReceiver() {
 
         val fullBody = messageBody.toString()
         val senderAddress = sender ?: ""
-Log.d(TAG, "SMS received from $senderAddress: ${fullBody.take(30)}...")
+        Log.d(TAG, "SMS received from $senderAddress: ${fullBody.take(30)}...")
 
-        // On Android 14+, only process if we are the default SMS app
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            if (!SystemUtils.isDefaultSmsApp(context)) {
-                Log.d(TAG, "Not default SMS app on Android 14+, scheduling fallback scan")
-                SmsScanWorker.enqueueFallbackScan(context)
-                return
-            }
-        }
+        // Note: SMS_RECEIVED is delivered to any app holding RECEIVE_SMS, even
+        // when not the default SMS app. The periodic SmsScanWorker is the
+        // safety net for anything missed here.
 
         val transaction = SmsParser.parseSms(fullBody, senderAddress, timestamp)
         if (transaction != null) {

@@ -211,6 +211,7 @@ fun TransactionDetailScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CategoryPicker(
     selectedCategory: Category,

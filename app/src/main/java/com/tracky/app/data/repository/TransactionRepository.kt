@@ -15,6 +15,8 @@ import com.tracky.app.data.model.Category
 import com.tracky.app.data.sms.SmsReader
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -28,18 +30,25 @@ class TransactionRepository @Inject constructor(
     private val dailySummaryDao: DailySummaryDao,
     private val budgetDao: BudgetDao
 ) {
-    suspend fun addTransaction(transaction: TransactionEntity): Boolean {
+    /**
+     * Serializes all dedup-check-then-insert operations. Without this, the
+     * real-time receiver, the initial backfill, and the periodic scan can
+     * interleave and import the same message twice.
+     */
+    private val writeMutex = Mutex()
+
+    suspend fun addTransaction(transaction: TransactionEntity): Boolean = writeMutex.withLock {
         val category = AutoCategoryManager.categorize(transaction.messageBody, transaction.channel, transaction.contact)
         val enriched = transaction.copy(category = category.name)
 
         // Check for duplicates before inserting
         val existing = transactionDao.getAllTransactionsList()
         if (DuplicateDetector.isDuplicate(enriched, existing)) {
-            return false // Duplicate detected, not inserted
+            return@withLock false // Duplicate detected, not inserted
         }
 
         transactionDao.insert(enriched)
-        return true
+        return@withLock true
     }
 
     suspend fun addRawTransaction(transaction: TransactionEntity) {
@@ -78,20 +87,27 @@ class TransactionRepository @Inject constructor(
     fun searchTransactions(query: String): Flow<List<TransactionEntity>> =
         transactionDao.searchTransactions(query)
 
-    suspend fun scanExistingSms(context: Context): Int {
+    suspend fun scanExistingSms(context: Context, days: Int = 90): Int = writeMutex.withLock {
         val smsReader = SmsReader(context)
-        val transactions = smsReader.readExistingSms()
+        val transactions = smsReader.readExistingSms(days)
         if (transactions.isNotEmpty()) {
             val existing = transactionDao.getAllTransactionsList()
-            val newTransactions = transactions.filter { newTx ->
-                !DuplicateDetector.isDuplicate(newTx, existing)
+            // Dedup against DB and within the batch itself (a message can be
+            // picked up by both the real-time receiver and a scan).
+            val newTransactions = mutableListOf<TransactionEntity>()
+            for (tx in transactions) {
+                val duplicateOfDb = DuplicateDetector.isDuplicate(tx, existing)
+                val duplicateInBatch = DuplicateDetector.isDuplicate(tx, newTransactions)
+                if (!duplicateOfDb && !duplicateInBatch) {
+                    newTransactions.add(tx)
+                }
             }
             if (newTransactions.isNotEmpty()) {
                 transactionDao.insertAll(newTransactions)
             }
-            return newTransactions.size
+            return@withLock newTransactions.size
         }
-        return 0
+        return@withLock 0
     }
 
     suspend fun exportToCsv(context: Context, uri: Uri): Int {
@@ -187,6 +203,11 @@ class TransactionRepository @Inject constructor(
 
     suspend fun setBudget(category: Category, limit: Double) {
         budgetDao.insert(BudgetEntity(category = category.name, monthlyLimit = limit))
+    }
+
+    /** Insert-or-replace — used by backup restore where rows may not exist yet. */
+    suspend fun upsertBudget(budget: BudgetEntity) {
+        budgetDao.insert(budget)
     }
 
     suspend fun updateBudget(budget: BudgetEntity) {

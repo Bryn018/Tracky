@@ -110,8 +110,8 @@ object SmsParser {
     )
 
     private val contactNameRegex = listOf(
-        Regex("""(?:from|From|to|To)\s+([A-Za-z\s.]+?)(?:\s+(?:on|at|via)\s|\s+\d|\s*$|\s+Ksh|\s+-)"""),
-        Regex("""(?:sent\s+to|Sent\s+to|received\s+from|Received\s+from)\s+([A-Za-z\s.]+?)(?:\s+(?:on|at|via)\s|\s+\d|\s*$)"""),
+        Regex("""(?:from|From|to|To)\s+([A-Za-z\s.]+?)(?:\s+(?:on|at|via)\s|\s+\d|\s*$|\s+Ksh|\s+-|\s+[Bb]alance|\s+[Bb]al:)"""),
+        Regex("""(?:sent\s+to|Sent\s+to|received\s+from|Received\s+from)\s+([A-Za-z\s.]+?)(?:\s+(?:on|at|via)\s|\s+\d|\s*$|\s+[Bb]alance|\s+[Bb]al:)"""),
     )
 
     // ── Public API ─────────────────────────────────────────────────────
@@ -124,13 +124,17 @@ object SmsParser {
         val body = messageBody.trim()
         if (body.isBlank()) return null
 
-        // Scam/fraud detection
-        if (isScamMessage(body, senderAddress)) {
+        // Identify the channel — if it's not from a known financial sender,
+        // it's not a transaction no matter what the body says.
+        val channel = detectChannel(senderAddress, body) ?: return null
+
+        // Scam/fraud detection — only applied to messages that don't come from
+        // a verified financial sender address (MPESA/AIRTEL/bank shortcodes).
+        // Legit bank/M-Pesa messages often contain "PIN", "urgent", links etc.
+        // in their security footers; those are valid transactions.
+        if (!isTrustedSender(senderAddress) && isScamMessage(body, senderAddress)) {
             return null
         }
-
-        // Identify the channel
-        val channel = detectChannel(senderAddress, body) ?: return null
 
         // Parse the transaction
         val parsed = parseTransaction(body, channel) ?: return null
@@ -150,6 +154,21 @@ object SmsParser {
             balance = balance,
             category = category.name
         )
+    }
+
+    // ── Trusted sender detection ───────────────────────────────────────
+
+    /**
+     * True when the message comes from a known financial sender address
+     * (M-Pesa, Airtel Money, or a Kenyan bank shortcode). Messages from
+     * these senders skip the scam filter — banks legitimately include
+     * "PIN", "urgent", URLs etc. in their security footers.
+     */
+    private fun isTrustedSender(senderAddress: String): Boolean {
+        val sender = senderAddress.trim().uppercase()
+        if (sender.isBlank()) return false
+        if (sender.contains("MPESA") || sender.contains("AIRTEL")) return true
+        return bankSenderPatterns.any { sender.contains(it) }
     }
 
     // ── Scam detection ─────────────────────────────────────────────────
@@ -255,6 +274,18 @@ object SmsParser {
             return Triple(amount, "OUTGOING", contactInfo)
         }
 
+        // 2b. "sent 3,200.00 to NAME" (amount between "sent" and "to")
+        val sentAmountMatch = Regex(
+            """(?:sent|Sent)\s+(?:Ksh|KES|KSh|ksh)?\s*([\d,]+(?:\.\d{1,2})?)\s*(?:to|To)\s+(.+?)(?:\s+(?:on|at)\b|\s+\d|$)""",
+            RegexOption.IGNORE_CASE
+        ).find(body)
+
+        if (sentAmountMatch != null) {
+            val amount = parseAmount(sentAmountMatch.groupValues[1])
+            val contactInfo = extractContact(sentAmountMatch.groupValues[2].trim())
+            return Triple(amount, "OUTGOING", contactInfo)
+        }
+
         // 3. Paid to (Till Number, Paybill)
         val paidMatch = Regex(
             """(?:paid|Paid)\s+(?:to|To)\s+(.+?)(?:\s+on|\s+at|\s+\d|$)""",
@@ -314,7 +345,7 @@ object SmsParser {
         val bodyUpper = body.uppercase()
 
         val receivedMatch = Regex(
-            """(?:received|Received)\s+(?:Ksh|KES|KSh|ksh)?\s*([\d,]+(?:\.\d{1,2})?)\s*(?:from|From)\s+(.+?)(?:\s+\d|\s+on|\s+at|$)""",
+            """(?:received|Received)\s+(?:Ksh|KES|KSh|ksh)?\s*([\d,]+(?:\.\d{1,2})?)\s*(?:from|From)\s+(.+?)(?:\s+\d|\s+on|\s+at|\s+\.\s|\s+[Bb]alance|\s+[Bb]al:|$)""",
             RegexOption.IGNORE_CASE
         ).find(body)
 
@@ -438,7 +469,10 @@ object SmsParser {
         if (number != null) {
             return number.value.replace(" ", "")
         }
-        val cleaned = text.trim().replace(Regex("""\s+"""), " ")
+        val cleaned = text.trim()
+            .replace(Regex("""\s+"""), " ")
+            .trimEnd('.', ',', ';')
+            .trim()
         return cleaned.ifBlank { null }
     }
 

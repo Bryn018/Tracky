@@ -26,6 +26,11 @@ class DailyReportWorker @AssistedInject constructor(
     override suspend fun doWork(): Result {
         val summary = transactionRepository.getTodaySummary().first()
 
+        // Don't bother (or crash-retry) if notifications are disabled
+        if (!NotificationManagerCompat.from(applicationContext).areNotificationsEnabled()) {
+            return Result.success()
+        }
+
         if (summary == null || summary.transactionCount == 0) {
             showNoTransactionNotification()
             return Result.success()

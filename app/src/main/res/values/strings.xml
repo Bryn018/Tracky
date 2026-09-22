@@ -89,4 +89,6 @@
     <string name="battery_optimization_already_excluded">Already excluded</string>
     <string name="default_sms_prompt">Set Tracky as default SMS app for the best tracking experience.</string>
     <string name="battery_prompt">Keep Tracky running reliably in the background.</string>
+    <string name="backfill_notification_title">Tracky history import complete</string>
+    <string name="backfill_notification_body">Imported %1$d transactions from the last 90 days. New transactions are now tracked automatically.</string>
 </resources>

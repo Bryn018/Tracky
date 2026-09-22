@@ -86,9 +86,9 @@ class BackupViewModel @Inject constructor(
                     transactionRepository.addRawTransaction(tx)
                 }
 
-                // Restore budgets
+                // Restore budgets (insert-or-replace: rows were just cleared)
                 backup.budgets.forEach { budget ->
-                    transactionRepository.updateBudget(budget)
+                    transactionRepository.upsertBudget(budget)
                 }
 
                 _restoreState.value = BackupState.Success(
