@@ -12,11 +12,17 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface TransactionDao {
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insert(transaction: TransactionEntity)
+    /**
+     * IGNORE, not REPLACE. The unique index on smsKey makes this the
+     * authoritative dedup check: a duplicate insert is a no-op rather than a
+     * row replacement, so a re-scan can never destroy a row the user has
+     * since annotated or re-categorised.
+     */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insert(transaction: TransactionEntity): Long
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertAll(transactions: List<TransactionEntity>)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertAll(transactions: List<TransactionEntity>): List<Long>
 
     @Update
     suspend fun update(transaction: TransactionEntity)
@@ -49,7 +55,15 @@ interface TransactionDao {
     fun searchTransactions(query: String): Flow<List<TransactionEntity>>
 
     @Query("SELECT * FROM transactions ORDER BY timestamp DESC")
-    suspend fun getAllTransactionsList(): List<TransactionEntity> // For export
+    suspend fun getAllTransactionsList(): List<TransactionEntity>
+
+    /**
+     * Which of these keys already exist. Lets the repository detect
+     * duplicates with an indexed lookup instead of loading the entire
+     * transaction table on every incoming message.
+     */
+    @Query("SELECT smsKey FROM transactions WHERE smsKey IN (:keys)")
+    suspend fun findExistingKeys(keys: List<String>): List<String>
 
     @Query("SELECT * FROM transactions WHERE id = :id")
     suspend fun getTransactionById(id: Long): TransactionEntity?
@@ -60,22 +74,81 @@ interface TransactionDao {
     @Query("DELETE FROM transactions WHERE id = :id")
     suspend fun deleteById(id: Long)
 
+    /**
+     * Period totals computed in SQL over integer cents, so no rounding error
+     * can accumulate. Reversals and refunds subtract from spending, which is
+     * what stops a reversed purchase from continuing to inflate what the user
+     * is shown as having spent.
+     */
     @Query(
-        "SELECT " +
-        ":dateStart AS id, " +
-        ":dateString AS date, " +
-        "COALESCE(SUM(CASE WHEN type = 'INCOMING' THEN amount ELSE 0 END), 0.0) AS totalIncoming, " +
-        "COALESCE(SUM(CASE WHEN type = 'OUTGOING' THEN amount ELSE 0 END), 0.0) AS totalOutgoing, " +
-        "COUNT(*) AS transactionCount, " +
-        "NULL AS topChannel, " +
-        "NULL AS primaryContact " +
-        "FROM transactions WHERE timestamp BETWEEN :dateStart AND :dateEnd"
+        """
+        SELECT
+            :dateString AS id,
+            :dateString AS date,
+            COALESCE(SUM(CASE WHEN type = 'INCOMING' THEN amountCents ELSE 0 END), 0) AS totalIncomingCents,
+            COALESCE(SUM(
+                CASE type
+                    WHEN 'OUTGOING' THEN amountCents
+                    WHEN 'REVERSAL' THEN -amountCents
+                    WHEN 'REFUND' THEN -amountCents
+                    ELSE 0
+                END
+            ), 0) AS totalOutgoingCents,
+            COUNT(*) AS transactionCount,
+            NULL AS topChannel,
+            NULL AS primaryContact
+        FROM transactions
+        WHERE timestamp BETWEEN :dateStart AND :dateEnd
+        """
     )
-    fun getTodaySummary(
+    fun getSummaryForPeriod(
         dateStart: Long,
         dateEnd: Long,
         dateString: String
     ): Flow<DailySummaryEntity?>
+
+    /**
+     * Per-day totals across a window, grouped in SQL. Reversals and refunds
+     * subtract from spending, matching [getSummaryForPeriod].
+     */
+    @Query(
+        """
+        SELECT
+            strftime('%Y-%m-%d', timestamp / 1000, 'unixepoch', 'localtime') AS date,
+            COALESCE(SUM(CASE WHEN type = 'INCOMING' THEN amountCents ELSE 0 END), 0) AS totalIncomingCents,
+            COALESCE(SUM(
+                CASE type
+                    WHEN 'OUTGOING' THEN amountCents
+                    WHEN 'REVERSAL' THEN -amountCents
+                    WHEN 'REFUND' THEN -amountCents
+                    ELSE 0
+                END
+            ), 0) AS totalOutgoingCents,
+            COUNT(*) AS transactionCount
+        FROM transactions
+        WHERE timestamp BETWEEN :start AND :end
+        GROUP BY date
+        ORDER BY date DESC
+        """
+    )
+    fun getDailyTotals(start: Long, end: Long): Flow<List<DailyTotalRow>>
+
+    /** Net spend in one category over a window, excluding reversals/refunds. */
+    @Query(
+        """
+        SELECT COALESCE(SUM(
+            CASE type
+                WHEN 'OUTGOING' THEN amountCents
+                WHEN 'REVERSAL' THEN -amountCents
+                WHEN 'REFUND' THEN -amountCents
+                ELSE 0
+            END
+        ), 0)
+        FROM transactions
+        WHERE category = :category AND timestamp BETWEEN :start AND :end
+        """
+    )
+    fun getCategorySpendFlow(category: String, start: Long, end: Long): Flow<Long>
 
     @Query("SELECT COUNT(*) FROM transactions")
     fun getTransactionCount(): Flow<Int>

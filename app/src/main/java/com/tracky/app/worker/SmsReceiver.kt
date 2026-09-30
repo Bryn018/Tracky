@@ -15,6 +15,8 @@ import com.tracky.app.R
 import com.tracky.app.TrackyApplication
 import com.tracky.app.data.local.entity.TransactionEntity
 import com.tracky.app.data.repository.TransactionRepository
+import com.tracky.app.data.model.Money
+import com.tracky.app.data.model.TransactionType
 import com.tracky.app.data.sms.SmsParser
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -59,16 +61,20 @@ class SmsReceiver : BroadcastReceiver() {
         // when not the default SMS app. The periodic SmsScanWorker is the
         // safety net for anything missed here.
 
-        val transaction = SmsParser.parseSms(fullBody, senderAddress, timestamp)
-        if (transaction != null) {
+        // A single message can carry more than one movement (concatenated
+        // confirmations), so all of them are saved, not just the first.
+        val transactions = SmsParser.parseAll(fullBody, senderAddress, timestamp)
+        if (transactions.isNotEmpty()) {
             // Use goAsync() to keep the receiver alive while we save
             val pendingResult = goAsync()
             CoroutineScope(Dispatchers.IO).launch {
                 try {
                     withTimeout(10_000) { // 10 second timeout
-                        transactionRepository.addTransaction(transaction)
-                        Log.d(TAG, "Transaction saved: ${transaction.amount} ${transaction.type}")
-                        showSilentNotification(context, transaction)
+                        val saved = transactionRepository.addTransactions(transactions)
+                        Log.d(TAG, "Saved $saved/${transactions.size} transactions from SMS")
+                        // Notify once per message, not once per movement, so a
+                        // concatenated pair does not produce two alerts.
+                        transactions.firstOrNull()?.let { showSilentNotification(context, it, saved) }
                     }
                 } catch (e: TimeoutCancellationException) {
                     Log.e(TAG, "Timeout saving transaction", e)
@@ -83,14 +89,27 @@ class SmsReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun showSilentNotification(context: Context, transaction: TransactionEntity) {
+    private fun showSilentNotification(context: Context, transaction: TransactionEntity, count: Int) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val notificationManager = NotificationManagerCompat.from(context)
             if (!notificationManager.areNotificationsEnabled()) return
         }
 
-        val type = if (transaction.type == "INCOMING") "Received" else "Sent"
-        val body = "$type ${transaction.amount} via ${transaction.channel}"
+        val verb = when (TransactionType.fromString(transaction.type)) {
+            TransactionType.INCOMING -> "Received"
+            TransactionType.OUTGOING -> "Sent"
+            TransactionType.REVERSAL -> "Reversed"
+            TransactionType.REFUND -> "Refunded"
+            null -> "Processed"
+        }
+        val body = buildString {
+            append(verb)
+            append(" ")
+            append(Money(transaction.amountCents).toDisplayString())
+            if (count > 1) append(" (+${count - 1} more)")
+            append(" via ")
+            append(transaction.channel)
+        }
 
         val tapIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP

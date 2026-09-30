@@ -5,73 +5,74 @@ import java.util.Calendar
 
 /**
  * Calculates current spending per category for a given month.
+ *
+ * All arithmetic is in integer shilling cents. The previous version summed
+ * Doubles, so a category total could land a cent either side of a budget
+ * limit purely from float representation.
  */
 object BudgetCalculator {
 
     data class CategorySpending(
         val category: Category,
-        val spent: Double,
-        val budget: Double?,
-        val remaining: Double?
+        val spentCents: Long,
+        val budgetCents: Long?
     ) {
         val isOverBudget: Boolean
-            get() = budget != null && spent > budget
+            get() = budgetCents != null && spentCents > budgetCents!!
+
+        val remainingCents: Long?
+            get() = budgetCents?.let { it - spentCents }
 
         val progressFraction: Float
-            get() = if (budget != null && budget > 0) (spent / budget).toFloat().coerceIn(0f, 1.5f) else 0f
+            get() = if (budgetCents != null && budgetCents!! > 0) {
+                (spentCents.toDouble() / budgetCents!!.toDouble()).toFloat().coerceIn(0f, 1.5f)
+            } else 0f
     }
 
     /**
-     * Get spending summary for each category with a budget.
+     * Spending per category for the current month, net of reversals and
+     * refunds. A reversed purchase no longer counts against its budget.
      */
     fun calculateSpending(
         transactions: List<TransactionEntity>,
         budgets: List<CategorySpending>
     ): List<CategorySpending> {
-        val cal = Calendar.getInstance()
-        val currentMonth = cal.get(Calendar.MONTH)
-        val currentYear = cal.get(Calendar.YEAR)
-
-        // Filter to current month's OUTGOING transactions
-        val monthTransactions = transactions.filter {
-            val txCal = Calendar.getInstance()
-            txCal.timeInMillis = it.timestamp
-            txCal.get(Calendar.MONTH) == currentMonth &&
-                txCal.get(Calendar.YEAR) == currentYear &&
-                it.type == "OUTGOING"
-        }
-
-        // Group by category
-        val spendingByCategory = monthTransactions.groupBy { Category.fromString(it.category) }
-            .mapValues { (_, txs) -> txs.sumOf { it.amount } }
+        val spendingByCategory = currentMonthSpending(transactions)
 
         return budgets.map { budget ->
-            val spent = spendingByCategory[budget.category] ?: 0.0
+            val spent = spendingByCategory[budget.category] ?: 0L
             CategorySpending(
                 category = budget.category,
-                spent = spent,
-                budget = budget.budget,
-                remaining = budget.budget?.let { it - spent }
+                spentCents = spent,
+                budgetCents = budget.budgetCents
             )
         }
     }
 
-    /**
-     * Get spending for all categories (even those without budgets).
-     */
-    fun calculateAllSpending(transactions: List<TransactionEntity>): Map<Category, Double> {
+    /** Spending for every category present this month, including unbudgeted ones. */
+    fun calculateAllSpending(transactions: List<TransactionEntity>): Map<Category, Long> =
+        currentMonthSpending(transactions)
+
+    private fun currentMonthSpending(transactions: List<TransactionEntity>): Map<Category, Long> {
         val cal = Calendar.getInstance()
         val currentMonth = cal.get(Calendar.MONTH)
         val currentYear = cal.get(Calendar.YEAR)
 
-        return transactions.filter {
-            val txCal = Calendar.getInstance()
-            txCal.timeInMillis = it.timestamp
-            txCal.get(Calendar.MONTH) == currentMonth &&
-                txCal.get(Calendar.YEAR) == currentYear &&
-                it.type == "OUTGOING"
-        }
+        return transactions
+            .filter { inMonth(it, currentMonth, currentYear) }
             .groupBy { Category.fromString(it.category) }
-            .mapValues { (_, txs) -> txs.sumOf { it.amount } }
+            .mapValues { (_, txs) ->
+                txs.fold(0L) { acc, tx ->
+                    val type = TransactionType.fromString(tx.type) ?: TransactionType.OUTGOING
+                    acc + (tx.amountCents * type.spendingMultiplier)
+                }
+            }
+            .filterValues { it != 0L }
+    }
+
+    private fun inMonth(tx: TransactionEntity, month: Int, year: Int): Boolean {
+        val txCal = Calendar.getInstance()
+        txCal.timeInMillis = tx.timestamp
+        return txCal.get(Calendar.MONTH) == month && txCal.get(Calendar.YEAR) == year
     }
 }

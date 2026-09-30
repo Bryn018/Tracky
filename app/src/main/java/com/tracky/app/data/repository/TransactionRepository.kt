@@ -8,51 +8,82 @@ import com.tracky.app.data.local.dao.DailySummaryDao
 import com.tracky.app.data.local.dao.TransactionDao
 import com.tracky.app.data.local.entity.BudgetEntity
 import com.tracky.app.data.local.entity.DailySummaryEntity
-import com.tracky.app.data.local.entity.DuplicateDetector
 import com.tracky.app.data.local.entity.TransactionEntity
 import com.tracky.app.data.model.AutoCategoryManager
 import com.tracky.app.data.model.Category
+import com.tracky.app.data.model.Money
+import com.tracky.app.data.model.TransactionType
 import com.tracky.app.data.sms.SmsReader
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import java.text.SimpleDateFormat
 import java.util.Calendar
-import java.util.Date
-import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
 class TransactionRepository @Inject constructor(
     private val transactionDao: TransactionDao,
-    private val dailySummaryDao: DailySummaryDao,
+    @Suppress("unused") private val dailySummaryDao: DailySummaryDao,
     private val budgetDao: BudgetDao
 ) {
     /**
-     * Serializes all dedup-check-then-insert operations. Without this, the
-     * real-time receiver, the initial backfill, and the periodic scan can
+     * Serialises the dedup-check-then-insert sequences. Without it the
+     * real-time receiver, the initial backfill and the periodic scan can
      * interleave and import the same message twice.
+     *
+     * Note what this mutex no longer has to guard: the previous version held
+     * it across a full-table read and linear scan on every incoming message,
+     * so the cost of the fix grew with the size of the user's history. Dedup
+     * is now an indexed key lookup, so the critical section is small and
+     * roughly constant no matter how many rows exist.
      */
     private val writeMutex = Mutex()
 
-    suspend fun addTransaction(transaction: TransactionEntity): Boolean = writeMutex.withLock {
-        val category = AutoCategoryManager.categorize(transaction.messageBody, transaction.channel, transaction.contact)
-        val enriched = transaction.copy(category = category.name)
+    /**
+     * Insert [transactions], skipping any whose source SMS has already been
+     * imported. Returns the number actually inserted.
+     *
+     * Dedup keys on SMS identity (sender + timestamp + body) rather than on
+     * amount/contact proximity. The old rule could not tell a re-delivered
+     * message from two genuine identical purchases, and silently deleted the
+     * real one.
+     */
+    suspend fun addTransactions(transactions: List<TransactionEntity>): Int = writeMutex.withLock {
+        if (transactions.isEmpty()) return@withLock 0
 
-        // Check for duplicates before inserting
-        val existing = transactionDao.getAllTransactionsList()
-        if (DuplicateDetector.isDuplicate(enriched, existing)) {
-            return@withLock false // Duplicate detected, not inserted
+        val enriched = transactions.map { tx ->
+            val category = AutoCategoryManager.categorize(tx.messageBody, tx.channel, tx.contact)
+            tx.copy(category = category.name)
         }
 
-        transactionDao.insert(enriched)
-        return@withLock true
+        // Dedup within the batch as well as against the database: a re-scan
+        // can hand us the same message twice in a single pass.
+        val seenKeys = mutableSetOf<String>()
+        val unique = enriched.filter { seenKeys.add(it.smsKey) }
+
+        val candidateKeys = unique.map { it.smsKey }.distinct()
+        val existing = transactionDao.findExistingKeys(candidateKeys).toHashSet()
+        val fresh = unique.filter { it.smsKey !in existing }
+        if (fresh.isEmpty()) return@withLock 0
+
+        // The unique index on smsKey is the backstop: even if two callers
+        // somehow raced past the check, the second insert is ignored.
+        val inserted = transactionDao.insertAll(fresh)
+        inserted.count { it != -1L }
     }
 
+    /** Single-transmission convenience wrapper. */
+    suspend fun addTransaction(transaction: TransactionEntity): Boolean =
+        addTransactions(listOf(transaction)) > 0
+
+    /**
+     * Insert without dedup, for backup restore where rows come from a
+     * known-good export and must be preserved verbatim.
+     */
     suspend fun addRawTransaction(transaction: TransactionEntity) {
-        transactionDao.insert(transaction)
+        writeMutex.withLock { transactionDao.insert(transaction) }
     }
 
     suspend fun updateTransaction(transaction: TransactionEntity) {
@@ -67,13 +98,11 @@ class TransactionRepository @Inject constructor(
         transactionDao.updateCategory(id, category.name)
     }
 
-    suspend fun getTransactionById(id: Long): TransactionEntity? {
-        return transactionDao.getTransactionById(id)
-    }
+    suspend fun getTransactionById(id: Long): TransactionEntity? =
+        transactionDao.getTransactionById(id)
 
-    fun getTransactionByIdFlow(id: Long): Flow<TransactionEntity?> {
-        return transactionDao.getTransactionByIdFlow(id)
-    }
+    fun getTransactionByIdFlow(id: Long): Flow<TransactionEntity?> =
+        transactionDao.getTransactionByIdFlow(id)
 
     suspend fun deleteTransactionById(id: Long) {
         transactionDao.deleteById(id)
@@ -81,33 +110,20 @@ class TransactionRepository @Inject constructor(
 
     fun getAllTransactions(): Flow<List<TransactionEntity>> = transactionDao.getAllTransactions()
 
-    fun getTransactionsByType(type: String): Flow<List<TransactionEntity>> =
-        transactionDao.getTransactionsByType(type)
+    fun getTransactionsByType(type: TransactionType): Flow<List<TransactionEntity>> =
+        transactionDao.getTransactionsByType(type.name)
 
     fun searchTransactions(query: String): Flow<List<TransactionEntity>> =
         transactionDao.searchTransactions(query)
 
-    suspend fun scanExistingSms(context: Context, days: Int = 90): Int = writeMutex.withLock {
+    /**
+     * Re-read recent SMS and import anything not already held. Uses the same
+     * [addTransactions] path, so this is idempotent by construction rather
+     * than by a proximity heuristic.
+     */
+    suspend fun scanExistingSms(context: Context, days: Int = 90): Int {
         val smsReader = SmsReader(context)
-        val transactions = smsReader.readExistingSms(days)
-        if (transactions.isNotEmpty()) {
-            val existing = transactionDao.getAllTransactionsList()
-            // Dedup against DB and within the batch itself (a message can be
-            // picked up by both the real-time receiver and a scan).
-            val newTransactions = mutableListOf<TransactionEntity>()
-            for (tx in transactions) {
-                val duplicateOfDb = DuplicateDetector.isDuplicate(tx, existing)
-                val duplicateInBatch = DuplicateDetector.isDuplicate(tx, newTransactions)
-                if (!duplicateOfDb && !duplicateInBatch) {
-                    newTransactions.add(tx)
-                }
-            }
-            if (newTransactions.isNotEmpty()) {
-                transactionDao.insertAll(newTransactions)
-            }
-            return@withLock newTransactions.size
-        }
-        return@withLock 0
+        return addTransactions(smsReader.readExistingSms(days))
     }
 
     suspend fun exportToCsv(context: Context, uri: Uri): Int {
@@ -124,21 +140,54 @@ class TransactionRepository @Inject constructor(
     fun getRecentTransactions(limit: Int): Flow<List<TransactionEntity>> =
         transactionDao.getAllTransactions().map { list -> list.take(limit) }
 
+    // ── Summaries (aggregated in SQL over integer cents) ───────────────
+
     fun getTodaySummary(): Flow<DailySummaryEntity?> {
+        val (start, end) = dayBounds()
+        return transactionDao.getSummaryForPeriod(start, end, todayString())
+    }
+
+    fun getWeeklySummary(): Flow<DailySummaryEntity?> {
         val cal = Calendar.getInstance()
-        cal.set(Calendar.HOUR_OF_DAY, 0)
-        cal.set(Calendar.MINUTE, 0)
-        cal.set(Calendar.SECOND, 0)
-        cal.set(Calendar.MILLISECOND, 0)
-        val dayStart = cal.timeInMillis
-        cal.set(Calendar.HOUR_OF_DAY, 23)
-        cal.set(Calendar.MINUTE, 59)
-        cal.set(Calendar.SECOND, 59)
-        cal.set(Calendar.MILLISECOND, 999)
-        val dayEnd = cal.timeInMillis
-        val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
-        val dateString = dateFormat.format(Date())
-        return transactionDao.getTodaySummary(dayStart, dayEnd, dateString)
+        cal.add(Calendar.DAY_OF_YEAR, -7)
+        startOfDayMillis(cal)
+        return transactionDao.getSummaryForPeriod(cal.timeInMillis, System.currentTimeMillis(), todayString())
+    }
+
+    fun getSummaryFor(startMillis: Long, endMillis: Long, label: String = todayString()): Flow<DailySummaryEntity?> =
+        transactionDao.getSummaryForPeriod(startMillis, endMillis, label)
+
+    fun getTodaySpending(): Flow<Money> =
+        getTodaySummary().map { Money((it?.totalOutgoingCents ?: 0L).coerceAtLeast(0L)) }
+
+    fun getTodayIncome(): Flow<Money> =
+        getTodaySummary().map { Money((it?.totalIncomingCents ?: 0L).coerceAtLeast(0L)) }
+
+    /**
+     * Per-day totals for the last [days] days.
+     *
+     * This previously grouped the entire transaction table in Kotlin on every
+     * emission, re-running as new messages arrived. It is now a SQL GROUP BY
+     * over the timestamp index, so cost tracks the window requested rather
+     * than the total history held.
+     */
+    fun getDailySummaries(days: Int): Flow<List<DailySummaryEntity>> {
+        val cal = Calendar.getInstance()
+        cal.add(Calendar.DAY_OF_YEAR, -days)
+        startOfDayMillis(cal)
+        val start = cal.timeInMillis
+        val end = System.currentTimeMillis()
+
+        return transactionDao.getDailyTotals(start, end).map { rows ->
+            rows.map { row ->
+                DailySummaryEntity(
+                    date = row.date,
+                    totalIncomingCents = row.totalIncomingCents.coerceAtLeast(0L),
+                    totalOutgoingCents = row.totalOutgoingCents.coerceAtLeast(0L),
+                    transactionCount = row.transactionCount
+                )
+            }
+        }
     }
 
     fun getTransactionsForPeriod(startMillis: Long, endMillis: Long): Flow<List<TransactionEntity>> =
@@ -150,59 +199,17 @@ class TransactionRepository @Inject constructor(
     fun getTransactionsBetween(start: Long, end: Long): Flow<List<TransactionEntity>> =
         transactionDao.getTransactionsBetween(start, end)
 
-    fun getWeeklySummary(): Flow<DailySummaryEntity?> {
-        val cal = Calendar.getInstance()
-        cal.add(Calendar.DAY_OF_YEAR, -7)
-        cal.set(Calendar.HOUR_OF_DAY, 0)
-        cal.set(Calendar.MINUTE, 0)
-        cal.set(Calendar.SECOND, 0)
-        cal.set(Calendar.MILLISECOND, 0)
-        val weekStart = cal.timeInMillis
-        val now = System.currentTimeMillis()
-        val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
-        val dateString = dateFormat.format(Date())
-        return transactionDao.getTodaySummary(weekStart, now, dateString)
-    }
+    /** Spend in one category over a window, net of reversals and refunds. */
+    fun getCategorySpend(category: Category, startMillis: Long, endMillis: Long): Flow<Money> =
+        transactionDao.getCategorySpendFlow(category.name, startMillis, endMillis)
+            .map { Money(it.coerceAtLeast(0L)) }
 
-    fun getTodaySpending(): Flow<Double> =
-        getTodaySummary().map { it?.totalOutgoing ?: 0.0 }
+    // ── Budgets ────────────────────────────────────────────────────────
 
-    fun getTodayIncome(): Flow<Double> =
-        getTodaySummary().map { it?.totalIncoming ?: 0.0 }
-
-    fun getDailySummaries(days: Int): Flow<List<DailySummaryEntity>> {
-        return transactionDao.getAllTransactions().map { transactions ->
-            val grouped = transactions.groupBy {
-                val cal = Calendar.getInstance()
-                cal.timeInMillis = it.timestamp
-                "%04d-%02d-%02d".format(
-                    cal.get(Calendar.YEAR),
-                    cal.get(Calendar.MONTH) + 1,
-                    cal.get(Calendar.DAY_OF_MONTH)
-                )
-            }
-            grouped.entries
-                .map { (date, txs) ->
-                    DailySummaryEntity(
-                        date = date,
-                        totalIncoming = txs.filter { it.type == "INCOMING" }.sumOf { it.amount },
-                        totalOutgoing = txs.filter { it.type == "OUTGOING" }.sumOf { it.amount },
-                        transactionCount = txs.size,
-                        topChannel = txs.groupBy { it.channel }.maxByOrNull { it.value.size }?.key,
-                        primaryContact = txs.mapNotNull { it.contact }
-                            .groupBy { it }.maxByOrNull { it.value.size }?.key
-                    )
-                }
-                .sortedByDescending { it.date }
-                .take(days)
-        }
-    }
-
-    // Budget management
     fun getAllBudgets(): Flow<List<BudgetEntity>> = budgetDao.getAllBudgets()
 
-    suspend fun setBudget(category: Category, limit: Double) {
-        budgetDao.insert(BudgetEntity(category = category.name, monthlyLimit = limit))
+    suspend fun setBudget(category: Category, limit: Money) {
+        budgetDao.insert(BudgetEntity(category = category.name, monthlyLimitCents = limit.cents))
     }
 
     /** Insert-or-replace — used by backup restore where rows may not exist yet. */
@@ -218,11 +225,87 @@ class TransactionRepository @Inject constructor(
         budgetDao.deleteBudget(category.name)
     }
 
-    suspend fun getBudget(category: Category): BudgetEntity? {
-        return budgetDao.getBudget(category.name)
+    suspend fun getBudget(category: Category): BudgetEntity? =
+        budgetDao.getBudget(category.name)
+
+    fun getBudgetFlow(category: Category): Flow<BudgetEntity?> =
+        budgetDao.getBudgetFlow(category.name)
+
+    // ── Date helpers ───────────────────────────────────────────────────
+
+    internal fun todayString(): String {
+        val cal = Calendar.getInstance()
+        return "%04d-%02d-%02d".format(
+            cal.get(Calendar.YEAR),
+            cal.get(Calendar.MONTH) + 1,
+            cal.get(Calendar.DAY_OF_MONTH)
+        )
     }
 
-    fun getBudgetFlow(category: Category): Flow<BudgetEntity?> {
-        return budgetDao.getBudgetFlow(category.name)
+    fun startOfDayMillis(cal: Calendar): Long {
+        cal.set(Calendar.HOUR_OF_DAY, 0)
+        cal.set(Calendar.MINUTE, 0)
+        cal.set(Calendar.SECOND, 0)
+        cal.set(Calendar.MILLISECOND, 0)
+        return cal.timeInMillis
     }
+
+    fun dayBounds(): Pair<Long, Long> {
+        val cal = Calendar.getInstance()
+        val start = startOfDayMillis(cal)
+        cal.add(Calendar.DAY_OF_YEAR, 1)
+        cal.add(Calendar.MILLISECOND, -1)
+        return start to cal.timeInMillis
+    }
+
+    fun monthBounds(): Pair<Long, Long> {
+        val cal = Calendar.getInstance()
+        cal.set(Calendar.DAY_OF_MONTH, 1)
+        val start = startOfDayMillis(cal)
+        cal.add(Calendar.MONTH, 1)
+        cal.add(Calendar.MILLISECOND, -1)
+        return start to cal.timeInMillis
+    }
+
+    // ── Entity <-> Money accessors ─────────────────────────────────────
+    //
+    // The database stores integer cents; everything above this line works in
+    // [Money]. Keeping the conversion in one place is what stops a raw cents
+    // value from leaking into formatting or a budget comparison.
+
+    fun TransactionEntity.money(): Money = Money(amountCents)
+
+    fun TransactionEntity.balance(): Money? = balanceCents?.let { Money(it) }
+
+    fun TransactionEntity.transactionType(): TransactionType =
+        TransactionType.fromString(type) ?: TransactionType.OUTGOING
+
+    fun DailySummaryEntity.totalIncoming(): Money = Money(totalIncomingCents.coerceAtLeast(0L))
+
+    fun DailySummaryEntity.totalOutgoing(): Money = Money(totalOutgoingCents.coerceAtLeast(0L))
+
+    fun BudgetEntity.limit(): Money = Money(monthlyLimitCents)
+
+    fun transactionFromCents(
+        type: TransactionType,
+        amountCents: Long,
+        channel: String,
+        contact: String?,
+        messageBody: String,
+        timestamp: Long,
+        balanceCents: Long?,
+        category: String?,
+        smsKey: String
+    ): TransactionEntity = TransactionEntity(
+        type = type.name,
+        amountCents = amountCents,
+        channel = channel,
+        contact = contact,
+        senderName = contact,
+        messageBody = messageBody,
+        timestamp = timestamp,
+        balanceCents = balanceCents,
+        category = category,
+        smsKey = smsKey
+    )
 }

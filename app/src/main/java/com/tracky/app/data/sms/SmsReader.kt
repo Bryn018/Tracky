@@ -13,10 +13,13 @@ class SmsReader(private val context: Context) {
 
     /**
      * Reads existing SMS inbox messages from the last [days] days,
-     * parses each one through [SmsParser], and returns the list of
-     * successfully parsed [TransactionEntity] objects.
+     * parses each one through [SmsParser], and returns every
+     * [TransactionEntity] found.
      *
-     * Messages that don't match mobile money patterns are filtered out.
+     * A single message can yield more than one transaction — concatenated
+     * confirmations are common — so the result is not a one-to-one map of
+     * messages to rows. Messages that don't match mobile money patterns are
+     * filtered out by the parser.
      */
     fun readExistingSms(days: Int = DEFAULT_HISTORY_DAYS): List<TransactionEntity> {
         val transactions = mutableListOf<TransactionEntity>()
@@ -57,10 +60,8 @@ class SmsReader(private val context: Context) {
 
                 if (body.isBlank()) continue
 
-                val transaction = SmsParser.parseSms(body, address, date)
-                if (transaction != null) {
-                    transactions.add(transaction)
-                }
+                // One message may contain several movements.
+                transactions.addAll(SmsParser.parseAll(body, address, date))
             }
         }
 

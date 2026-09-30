@@ -47,6 +47,9 @@ class MainActivity : ComponentActivity() {
         smsPermissionGranted = wasGranted
         if (wasGranted) {
             onSmsPermissionGranted()
+            // Ask for notifications at the same moment the user has just
+            // agreed to SMS access, while the app has their attention.
+            checkAndRequestNotificationPermission()
         }
     }
 
@@ -79,6 +82,15 @@ class MainActivity : ComponentActivity() {
             // Permission already granted (e.g. app upgrade or relaunch):
             // make sure the backfill + periodic scan are armed.
             onSmsPermissionGranted()
+        }
+
+        // Request notification permission once SMS is granted. Without this
+        // call the launcher existed but was never invoked, so on Android 13+
+        // POST_NOTIFICATIONS stayed denied and every notification path
+        // (transaction confirmations, backfill, daily report) silently
+        // no-opped.
+        if (smsPermissionGranted) {
+            checkAndRequestNotificationPermission()
         }
 
         setContent {

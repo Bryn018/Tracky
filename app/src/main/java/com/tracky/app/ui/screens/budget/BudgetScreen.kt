@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.tracky.app.data.model.BudgetCalculator
 import com.tracky.app.data.model.Category
+import com.tracky.app.data.model.Money
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -101,7 +102,7 @@ fun BudgetScreen(
             items(categorySpending) { spending ->
                 BudgetProgressCard(
                     spending = spending,
-                    onEdit = { viewModel.showEditDialog(spending.category, spending.budget ?: 0.0) },
+                    onEdit = { viewModel.showEditDialog(spending.category, spending.budgetCents ?: 0L) },
                     onDelete = { viewModel.deleteBudget(spending.category) }
                 )
             }
@@ -184,12 +185,12 @@ private fun BudgetProgressCard(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = "Ksh ${String.format("%.0f", spending.spent)}",
+                    text = Money(spending.spentCents).toDisplayString(),
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium
                 )
                 Text(
-                    text = if (spending.budget != null) "of Ksh ${String.format("%.0f", spending.budget)}" else "No limit",
+                    text = spending.budgetCents?.let { "of ${Money(it).toDisplayString()}" } ?: "No limit",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -198,7 +199,7 @@ private fun BudgetProgressCard(
             if (spending.isOverBudget) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Over budget by Ksh ${String.format("%.0f", spending.spent - (spending.budget ?: 0.0))}",
+                    text = "Over budget by " + Money((spending.spentCents - (spending.budgetCents ?: 0L)).coerceAtLeast(0L)).toDisplayString(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                     fontWeight = FontWeight.Medium

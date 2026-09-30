@@ -33,6 +33,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.tracky.app.data.local.entity.TransactionEntity
 import com.tracky.app.data.model.Category
+import com.tracky.app.data.model.Money
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -57,8 +58,8 @@ fun TransactionCard(
     val contactName = remember(transaction.contact, transaction.senderName) {
         transaction.contact ?: transaction.senderName ?: "Unknown"
     }
-    val formattedAmount = remember(transaction.amount) {
-        String.format("%.2f", transaction.amount)
+    val formattedAmount = remember(transaction.amountCents) {
+        Money(transaction.amountCents).toPlainString()
     }
 
     var visible by remember { mutableStateOf(false) }

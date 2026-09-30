@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.tracky.app.data.local.entity.DailySummaryEntity
 import com.tracky.app.data.model.Category
+import com.tracky.app.data.model.Money
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -71,7 +72,7 @@ fun AnalyticsScreen(
                             color = MaterialTheme.colorScheme.onPrimaryContainer
                         )
                         Text(
-                            text = "Ksh ${String.format("%.2f", totalBalance)}",
+                            text = totalBalance.toDisplayString(),
                             style = MaterialTheme.typography.headlineLarge,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onPrimaryContainer
@@ -87,7 +88,7 @@ fun AnalyticsScreen(
                                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
                                 )
                                 Text(
-                                    text = "Ksh ${String.format("%.0f", monthlyIncome)}",
+                                    text = monthlyIncome.toDisplayString(),
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.SemiBold,
                                     color = MaterialTheme.colorScheme.onPrimaryContainer
@@ -100,7 +101,7 @@ fun AnalyticsScreen(
                                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
                                 )
                                 Text(
-                                    text = "Ksh ${String.format("%.0f", monthlyTotal)}",
+                                    text = monthlyTotal.toDisplayString(),
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.SemiBold,
                                     color = MaterialTheme.colorScheme.onPrimaryContainer
@@ -119,21 +120,21 @@ fun AnalyticsScreen(
                 ) {
                     AnalyticsSummaryCard(
                         title = "Week",
-                        value = "Ksh ${String.format("%.0f", weeklyTotal)}",
+                        value = weeklyTotal.toDisplayString(),
                         icon = Icons.Default.CalendarMonth,
                         color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.weight(1f)
                     )
                     AnalyticsSummaryCard(
                         title = "Month",
-                        value = "Ksh ${String.format("%.0f", monthlyTotal)}",
+                        value = monthlyTotal.toDisplayString(),
                         icon = Icons.Default.TrendingDown,
                         color = MaterialTheme.colorScheme.tertiary,
                         modifier = Modifier.weight(1f)
                     )
                     AnalyticsSummaryCard(
                         title = "Avg/Day",
-                        value = "Ksh ${String.format("%.0f", averageDaily)}",
+                        value = averageDaily.toDisplayString(),
                         icon = Icons.Default.TrendingUp,
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.weight(1f)
@@ -225,7 +226,12 @@ fun AnalyticsScreen(
                 }
             } else {
                 items(dailySummary.take(30)) { summary ->
-                    summary?.let { DailyBreakdownBar(it) }
+                    summary?.let {
+                        DailyBreakdownBar(
+                            it,
+                            maxOutgoingCents = dailySummary.maxOfOrNull { s -> s.totalOutgoingCents } ?: 1L
+                        )
+                    }
                 }
             }
 
@@ -273,7 +279,7 @@ fun AnalyticsScreen(
 
 @Composable
 private fun WeeklyTrendChart(trend: List<TrendPoint>) {
-    val maxAmount = trend.maxOfOrNull { it.amount } ?: 1.0
+    val maxAmountCents = trend.maxOfOrNull { it.amount.cents }?.coerceAtLeast(1L) ?: 1L
 
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
@@ -290,7 +296,7 @@ private fun WeeklyTrendChart(trend: List<TrendPoint>) {
                     modifier = Modifier.weight(1f)
                 ) {
                     Text(
-                        text = "${String.format("%.0f", point.amount)}",
+                        text = point.amount.toDisplayString(),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -298,7 +304,11 @@ private fun WeeklyTrendChart(trend: List<TrendPoint>) {
                     Box(
                         modifier = Modifier
                             .width(24.dp)
-                            .height(if (maxAmount > 0) ((point.amount / maxAmount) * 80).dp else 0.dp)
+                            .height(
+                            if (maxAmountCents > 0) {
+                                ((point.amount.cents.toDouble() / maxAmountCents.toDouble()) * 80).dp
+                            } else 0.dp
+                        )
                             .clip(RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp))
                             .background(MaterialTheme.colorScheme.error)
                     )
@@ -342,7 +352,7 @@ private fun CategoryBreakdownRow(item: CategoryAnalytics) {
                         fontWeight = FontWeight.Medium
                     )
                     Text(
-                        text = "Ksh ${String.format("%.0f", item.totalSpent)}",
+                        text = item.totalSpent.toDisplayString(),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -395,7 +405,7 @@ private fun ContactRow(contact: ContactAnalytics) {
                 )
             }
             Text(
-                text = "Ksh ${String.format("%.0f", contact.totalSpent)}",
+                text = contact.totalSpent.toDisplayString(),
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.error
@@ -442,9 +452,11 @@ private fun AnalyticsSummaryCard(
 }
 
 @Composable
-private fun DailyBreakdownBar(summary: DailySummaryEntity) {
-    val maxOutgoing = 1000.0
-    val barFraction = (summary.totalOutgoing / maxOutgoing).coerceIn(0.0, 1.0)
+private fun DailyBreakdownBar(summary: DailySummaryEntity, maxOutgoingCents: Long) {
+    // Scaled against the busiest day in the window rather than a hardcoded
+    // Ksh 1,000, which saturated every bar for anyone spending more.
+    val scale = maxOf(maxOutgoingCents, 1L)
+    val barFraction = (summary.totalOutgoingCents.toDouble() / scale.toDouble()).coerceIn(0.0, 1.0)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -461,7 +473,7 @@ private fun DailyBreakdownBar(summary: DailySummaryEntity) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = "Ksh ${String.format("%.0f", summary.totalOutgoing)}",
+                    text = Money(summary.totalOutgoingCents).toDisplayString(),
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.Medium,
                     color = MaterialTheme.colorScheme.error

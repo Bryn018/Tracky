@@ -14,6 +14,8 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.tracky.app.data.local.entity.TransactionEntity
 import com.tracky.app.data.model.Category
+import com.tracky.app.data.model.Money
+import com.tracky.app.data.model.TransactionType
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -91,20 +93,24 @@ fun TransactionDetailScreen(
                             modifier = Modifier.padding(24.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
+                            val type = TransactionType.fromString(tx.type) ?: TransactionType.OUTGOING
+                            val sign = if (type.isCredit) "+" else "-"
+                            val color = if (type.isCredit)
+                                MaterialTheme.colorScheme.onSecondaryContainer
+                            else MaterialTheme.colorScheme.onErrorContainer
                             Text(
-                                text = if (tx.type == "INCOMING") "+${String.format("%.2f", tx.amount)}" else "-${String.format("%.2f", tx.amount)}",
+                                // Shown against a background chosen for the
+                                // sign, so a reversal reads as money coming
+                                // back rather than as a second outgoing.
+                                text = sign + Money(tx.amountCents).toPlainString(),
                                 style = MaterialTheme.typography.headlineLarge,
                                 fontWeight = FontWeight.Bold,
-                                color = if (tx.type == "INCOMING")
-                                    MaterialTheme.colorScheme.onSecondaryContainer
-                                else MaterialTheme.colorScheme.onErrorContainer
+                                color = color
                             )
                             Text(
-                                text = if (tx.type == "INCOMING") "Received" else "Sent",
+                                text = type.displayName,
                                 style = MaterialTheme.typography.titleMedium,
-                                color = if (tx.type == "INCOMING")
-                                    MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
-                                else MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.7f)
+                                color = color.copy(alpha = 0.7f)
                             )
                         }
                     }
@@ -132,8 +138,8 @@ fun TransactionDetailScreen(
                             DetailRow("Channel", tx.channel, Icons.Default.AccountBalance)
                             DetailRow("Contact", tx.contact ?: "Unknown", Icons.Default.Person)
                             DetailRow("Date", SimpleDateFormat("MMM dd, yyyy hh:mm a", Locale.getDefault()).format(Date(tx.timestamp)), Icons.Default.CalendarToday)
-                            tx.balance?.let {
-                                DetailRow("Balance After", String.format("%.2f", it), Icons.Default.AccountBalanceWallet)
+                            tx.balanceCents?.let {
+                                DetailRow("Balance After", Money(it).toDisplayString(), Icons.Default.AccountBalanceWallet)
                             }
                         }
                     }

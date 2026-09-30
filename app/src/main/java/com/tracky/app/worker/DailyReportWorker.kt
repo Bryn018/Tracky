@@ -1,5 +1,6 @@
 package com.tracky.app.worker
 
+import com.tracky.app.data.model.Money
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -36,7 +37,7 @@ class DailyReportWorker @AssistedInject constructor(
             return Result.success()
         }
 
-        val spentAmount = "Ksh ${String.format("%.0f", summary.totalOutgoing)}"
+        val spentAmount = Money(summary.totalOutgoingCents).toDisplayString()
         val count = summary.transactionCount
 
         showReportNotification(spentAmount, count)

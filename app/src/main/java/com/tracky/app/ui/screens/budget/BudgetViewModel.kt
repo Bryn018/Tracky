@@ -7,6 +7,7 @@ import com.tracky.app.data.local.entity.TransactionEntity
 import com.tracky.app.data.model.BudgetCalculator
 import com.tracky.app.data.model.Category
 import com.tracky.app.data.repository.TransactionRepository
+import com.tracky.app.data.model.Money
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -37,6 +38,9 @@ class BudgetViewModel @Inject constructor(
     private val _editingLimit = MutableStateFlow("")
     val editingLimit: StateFlow<String> = _editingLimit.asStateFlow()
 
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error.asStateFlow()
+
     init {
         loadBudgets()
         observeSpending()
@@ -59,9 +63,8 @@ class BudgetViewModel @Inject constructor(
                 val budgetSpending = budgets.map {
                     BudgetCalculator.CategorySpending(
                         category = Category.fromString(it.category),
-                        spent = 0.0,
-                        budget = it.monthlyLimit,
-                        remaining = it.monthlyLimit
+                        spentCents = 0L,
+                        budgetCents = it.monthlyLimitCents
                     )
                 }
                 BudgetCalculator.calculateSpending(transactions, budgetSpending)
@@ -74,12 +77,14 @@ class BudgetViewModel @Inject constructor(
     fun showAddDialog() {
         _editingCategory.value = null
         _editingLimit.value = ""
+        _error.value = null
         _showAddDialog.value = true
     }
 
-    fun showEditDialog(category: Category, currentLimit: Double) {
+    fun showEditDialog(category: Category, currentLimitCents: Long) {
         _editingCategory.value = category
-        _editingLimit.value = String.format("%.0f", currentLimit)
+        // Edit field takes whole shillings, which is what a person types.
+        _editingLimit.value = Money(currentLimitCents).wholeShillings.toString()
         _showAddDialog.value = true
     }
 
@@ -92,11 +97,18 @@ class BudgetViewModel @Inject constructor(
     }
 
     fun saveBudget() {
-        val limit = _editingLimit.value.toDoubleOrNull() ?: return
+        // Parse through Money so a malformed entry is rejected outright rather
+        // than silently becoming a 0.00 budget.
+        val limit = Money.parseOrNull(_editingLimit.value)
+        if (limit == null || limit.isZero) {
+            _error.value = "Enter a valid amount"
+            return
+        }
         val category = _editingCategory.value ?: Category.UNCATEGORIZED
         viewModelScope.launch {
             transactionRepository.setBudget(category, limit)
             _showAddDialog.value = false
+            _error.value = null
         }
     }
 

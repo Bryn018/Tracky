@@ -1,5 +1,6 @@
 package com.tracky.app.ui.screens.settings
 
+import com.tracky.app.data.ExportHelper
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -154,28 +155,11 @@ class SettingsViewModel @Inject constructor(
                 val dateFormat = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.getDefault())
                 val fileName = "tracky_transactions_${dateFormat.format(Date())}.csv"
                 val file = File(context.cacheDir, fileName)
-                file.outputStream().bufferedWriter().use { writer ->
-                    writer.write("ID,Type,Amount,Channel,Contact,Sender,Timestamp,Balance,Notes,Category,MessageBody\n")
-                    for (tx in transactions) {
-                        val ts = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
-                            .format(Date(tx.timestamp))
-                        val line = buildString {
-                            append(tx.id); append(',')
-                            append(escapeCsv(tx.type)); append(',')
-                            append(tx.amount); append(',')
-                            append(escapeCsv(tx.channel)); append(',')
-                            append(escapeCsv(tx.contact ?: "")); append(',')
-                            append(escapeCsv(tx.senderName ?: "")); append(',')
-                            append(escapeCsv(ts)); append(',')
-                            append(tx.balance?.toString() ?: ""); append(',')
-                            append(escapeCsv(tx.notes ?: "")); append(',')
-                            append(escapeCsv(tx.category ?: "")); append(',')
-                            append(escapeCsv(tx.messageBody))
-                        }
-                        writer.write(line)
-                        writer.newLine()
-                    }
-                }
+                // Delegated to ExportHelper rather than reimplemented. This
+                // was a second, divergent copy of the CSV writer — it had
+                // already drifted on escaping and would have drifted further
+                // on the money format.
+                ExportHelper.exportTransactionsToCsv(context, transactions, Uri.fromFile(file))
                 _exportedFileForShare.value = file
                 _exportState.value = ExportState.Success(file.absolutePath)
             } catch (e: Exception) {

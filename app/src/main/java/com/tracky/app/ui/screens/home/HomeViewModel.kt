@@ -7,6 +7,8 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.tracky.app.data.local.entity.TransactionEntity
+import com.tracky.app.data.model.Money
+import com.tracky.app.data.model.TransactionType
 import com.tracky.app.data.repository.SettingsRepository
 import com.tracky.app.data.repository.TransactionRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -23,11 +25,11 @@ class HomeViewModel @Inject constructor(
     private val settingsRepository: SettingsRepository
 ) : ViewModel() {
 
-    private val _todaySpending = MutableStateFlow(0.0)
-    val todaySpending: StateFlow<Double> = _todaySpending.asStateFlow()
+    private val _todaySpending = MutableStateFlow(Money.ZERO)
+    val todaySpending: StateFlow<Money> = _todaySpending.asStateFlow()
 
-    private val _todayIncome = MutableStateFlow(0.0)
-    val todayIncome: StateFlow<Double> = _todayIncome.asStateFlow()
+    private val _todayIncome = MutableStateFlow(Money.ZERO)
+    val todayIncome: StateFlow<Money> = _todayIncome.asStateFlow()
 
     private val _recentTransactions = MutableStateFlow<List<TransactionEntity>>(emptyList())
     val recentTransactions: StateFlow<List<TransactionEntity>> = _recentTransactions.asStateFlow()
@@ -67,13 +69,11 @@ class HomeViewModel @Inject constructor(
             cal.set(Calendar.MILLISECOND, 999)
             val dayEnd = cal.timeInMillis
 
-            transactionRepository.getTransactionsForPeriod(dayStart, dayEnd).collect { transactions ->
-                _todaySpending.value = transactions
-                    .filter { it.type == "OUTGOING" }
-                    .sumOf { it.amount }
-                _todayIncome.value = transactions
-                    .filter { it.type == "INCOMING" }
-                    .sumOf { it.amount }
+            transactionRepository.getSummaryFor(dayStart, dayEnd).collect { summary ->
+                _todaySpending.value =
+                    Money((summary?.totalOutgoingCents ?: 0L).coerceAtLeast(0L))
+                _todayIncome.value =
+                    Money((summary?.totalIncomingCents ?: 0L).coerceAtLeast(0L))
             }
         }
     }
@@ -88,7 +88,7 @@ class HomeViewModel @Inject constructor(
 
     private fun loadRecentReceivedTransactions() {
         viewModelScope.launch {
-            transactionRepository.getTransactionsByType("INCOMING").collect { list ->
+            transactionRepository.getTransactionsByType(TransactionType.INCOMING).collect { list ->
                 _recentReceivedTransactions.value = list.take(5)
             }
         }

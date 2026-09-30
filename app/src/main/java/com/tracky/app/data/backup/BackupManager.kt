@@ -3,6 +3,7 @@ package com.tracky.app.data.backup
 import android.content.Context
 import android.net.Uri
 import com.tracky.app.data.local.entity.BudgetEntity
+import com.tracky.app.data.local.entity.SmsIdentity
 import com.tracky.app.data.local.entity.TransactionEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -18,7 +19,15 @@ import java.util.Locale
  */
 object BackupManager {
 
-    private const val BACKUP_VERSION = 1
+    /**
+     * v2 stores money as integer cents under explicit `…Cents` keys.
+     *
+     * v1 wrote shillings as a JSON double under `amount` / `balance` /
+     * `monthlyLimit`. Import still reads v1, converting through
+     * [toCents], so a backup taken by a previous install restores to the same
+     * value rather than being off by a factor of 100 or rejected outright.
+     */
+    private const val BACKUP_VERSION = 2
 
     /**
      * Export all data to a JSON file at the given URI.
@@ -78,15 +87,18 @@ object BackupManager {
             val txObj = JSONObject()
             txObj.put("id", tx.id)
             txObj.put("type", tx.type)
-            txObj.put("amount", tx.amount)
+            txObj.put("amountCents", tx.amountCents)
             txObj.put("channel", tx.channel)
             txObj.put("contact", tx.contact ?: "")
             txObj.put("senderName", tx.senderName ?: "")
             txObj.put("messageBody", tx.messageBody)
             txObj.put("timestamp", tx.timestamp)
-            txObj.put("balance", tx.balance ?: 0.0)
+            // Absent rather than 0 when unknown: "balance unknown" and
+            // "balance is zero" are different facts.
+            tx.balanceCents?.let { txObj.put("balanceCents", it) }
             txObj.put("notes", tx.notes ?: "")
             txObj.put("category", tx.category ?: "UNCATEGORIZED")
+            txObj.put("smsKey", tx.smsKey)
             transactionsArray.put(txObj)
         }
         root.put("transactions", transactionsArray)
@@ -95,7 +107,7 @@ object BackupManager {
         backup.budgets.forEach { budget ->
             val budgetObj = JSONObject()
             budgetObj.put("category", budget.category)
-            budgetObj.put("monthlyLimit", budget.monthlyLimit)
+            budgetObj.put("monthlyLimitCents", budget.monthlyLimitCents)
             budgetObj.put("isEnabled", budget.isEnabled)
             budgetObj.put("createdAt", budget.createdAt)
             budgetsArray.put(budgetObj)
@@ -118,16 +130,27 @@ object BackupManager {
                 transactions.add(
                     TransactionEntity(
                         id = txObj.getLong("id"),
-                        type = txObj.getString("type"),
-                        amount = txObj.getDouble("amount"),
+                        type = txObj.optString("type", "OUTGOING"),
+                        amountCents = readCents(txObj, "amountCents", "amount"),
                         channel = txObj.getString("channel"),
                         contact = txObj.optString("contact").ifBlank { null },
                         senderName = txObj.optString("senderName").ifBlank { null },
                         messageBody = txObj.getString("messageBody"),
                         timestamp = txObj.getLong("timestamp"),
-                        balance = txObj.optDouble("balance").let { if (it > 0) it else null },
+                        balanceCents = readOptionalCents(txObj, "balanceCents", "balance"),
                         notes = txObj.optString("notes").ifBlank { null },
-                        category = txObj.optString("category")
+                        category = txObj.optString("category"),
+                        // v1 backups predate smsKey. Deriving it from the row's
+                        // own content keeps the unique index satisfiable and
+                        // stops the restored row colliding with a later
+                        // re-import of the same message.
+                        smsKey = txObj.optString("smsKey").ifBlank {
+                            SmsIdentity.key(
+                                txObj.optString("senderName", txObj.optString("contact", "")),
+                                txObj.getLong("timestamp"),
+                                txObj.getString("messageBody")
+                            )
+                        }
                     )
                 )
             }
@@ -140,7 +163,7 @@ object BackupManager {
                     budgets.add(
                         BudgetEntity(
                             category = budgetObj.getString("category"),
-                            monthlyLimit = budgetObj.getDouble("monthlyLimit"),
+                            monthlyLimitCents = readCents(budgetObj, "monthlyLimitCents", "monthlyLimit"),
                             isEnabled = budgetObj.optBoolean("isEnabled", true),
                             createdAt = budgetObj.optLong("createdAt", System.currentTimeMillis())
                         )
@@ -183,5 +206,35 @@ object BackupManager {
         } catch (e: Exception) {
             null
         }
+    }
+
+    /**
+     * Read a money field in either format: `centsKey` holds integer cents
+     * (v2), `legacyKey` holds shillings as a double (v1).
+     */
+    private fun readCents(obj: JSONObject, centsKey: String, legacyKey: String): Long {
+        if (obj.has(centsKey)) {
+            return obj.optLong(centsKey, 0L).coerceAtLeast(0L)
+        }
+        if (obj.has(legacyKey)) {
+            return toCents(obj.optDouble(legacyKey, 0.0))
+        }
+        return 0L
+    }
+
+    /** As [readCents], but absent stays absent rather than becoming zero. */
+    private fun readOptionalCents(obj: JSONObject, centsKey: String, legacyKey: String): Long? {
+        if (obj.has(centsKey)) {
+            return obj.optLong(centsKey, 0L).takeIf { it > 0L }
+        }
+        if (obj.has(legacyKey)) {
+            return toCents(obj.optDouble(legacyKey, 0.0)).takeIf { it > 0L }
+        }
+        return null
+    }
+
+    private fun toCents(shillings: Double): Long {
+        if (shillings.isNaN() || shillings.isInfinite()) return 0L
+        return Math.round(shillings * 100.0).coerceAtLeast(0L)
     }
 }

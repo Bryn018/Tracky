@@ -1,5 +1,6 @@
 package com.tracky.app.worker
 
+import com.tracky.app.data.model.Money
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -36,9 +37,8 @@ class BudgetAlertWorker @AssistedInject constructor(
             val budgetSpending = budgets.map {
                 BudgetCalculator.CategorySpending(
                     category = Category.fromString(it.category),
-                    spent = 0.0,
-                    budget = it.monthlyLimit,
-                    remaining = it.monthlyLimit
+                    spentCents = 0L,
+                    budgetCents = it.monthlyLimitCents
                 )
             }
 
@@ -46,9 +46,17 @@ class BudgetAlertWorker @AssistedInject constructor(
 
             for (item in spending) {
                 if (item.isOverBudget) {
-                    showBudgetAlert(item.category.displayName, item.spent, item.budget ?: 0.0)
-                } else if (item.progressFraction > 0.8f && item.budget != null) {
-                    showBudgetWarning(item.category.displayName, item.spent, item.budget)
+                    showBudgetAlert(
+                        item.category.displayName,
+                        item.spentCents,
+                        item.budgetCents ?: 0L
+                    )
+                } else if (item.progressFraction > 0.8f && item.budgetCents != null) {
+                    showBudgetWarning(
+                        item.category.displayName,
+                        item.spentCents,
+                        item.budgetCents
+                    )
                 }
             }
 
@@ -58,17 +66,20 @@ class BudgetAlertWorker @AssistedInject constructor(
         }
     }
 
-    private fun showBudgetAlert(category: String, spent: Double, budget: Double) {
+    private fun showBudgetAlert(category: String, spentCents: Long, budgetCents: Long) {
         showNotification(
             "Budget Exceeded!",
-            "You've spent Ksh ${String.format("%.0f", spent)} of your Ksh ${String.format("%.0f", budget)} $category budget"
+            "You've spent ${Money(spentCents).toDisplayString()} of your " +
+                "${Money(budgetCents).toDisplayString()} $category budget"
         )
     }
 
-    private fun showBudgetWarning(category: String, spent: Double, budget: Double) {
+    private fun showBudgetWarning(category: String, spentCents: Long, budgetCents: Long) {
+        if (budgetCents <= 0L) return
+        val percent = (spentCents * 100L) / budgetCents
         showNotification(
             "Budget Warning",
-            "You've used ${String.format("%.0f", (spent / budget) * 100)}% of your $category budget"
+            "You've used $percent% of your $category budget"
         )
     }
 

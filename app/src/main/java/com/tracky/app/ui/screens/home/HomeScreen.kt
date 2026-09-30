@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import com.tracky.app.ui.components.EmptyState
 import com.tracky.app.ui.components.SummaryCard
 import com.tracky.app.ui.components.TransactionCard
+import com.tracky.app.data.model.Money
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -236,7 +237,7 @@ fun HomeScreen(
                     ) {
                         SummaryCard(
                             title = "Spent Today",
-                            value = "-Ksh ${String.format("%.2f", todaySpending)}",
+                            value = "-${todaySpending.toDisplayString()}",
                             color = MaterialTheme.colorScheme.error,
                             icon = Icons.Default.ShoppingCart,
                             modifier = Modifier.weight(1f),
@@ -244,7 +245,7 @@ fun HomeScreen(
                         )
                         SummaryCard(
                             title = "Received Today",
-                            value = "+Ksh ${String.format("%.2f", todayIncome)}",
+                            value = "+${todayIncome.toDisplayString()}",
                             color = MaterialTheme.colorScheme.secondary,
                             icon = Icons.AutoMirrored.Filled.TrendingUp,
                             modifier = Modifier.weight(1f),
@@ -283,7 +284,12 @@ fun HomeScreen(
                 } else {
                     items(
                         receivedTransactions.take(3),
-                        key = { it.id },
+                        // Both lists share this LazyColumn, so a bare id can
+                        // repeat across them: an INCOMING transaction is in
+                        // both "Recent Income" and "Recent Transactions".
+                        // Compose throws "Key was already used" on a collision,
+                        // which crashed the home screen. Namespace by list.
+                        key = { "income-${it.id}" },
                         contentType = { "transaction" }
                     ) { transaction ->
                         TransactionCard(
@@ -334,7 +340,7 @@ fun HomeScreen(
                 } else {
                     items(
                         recentTransactions,
-                        key = { it.id },
+                        key = { "recent-${it.id}" },
                         contentType = { "transaction" }
                     ) { transaction ->
                         TransactionCard(
